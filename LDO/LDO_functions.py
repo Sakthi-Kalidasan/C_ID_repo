@@ -157,9 +157,8 @@ def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, Av_2=1, k_res_div=3/4, 
 
     Av_1 = (1 / PSRR_target) * (1 / Av_2) * (1/k_res_div) * (1/Av_pass)
 
-    GBW_stage1 = Av_1 * f_p2
-    GBW_stage2 = Av_2 * f_p3
-
+    GBW_stage1 = Av_1 * f_p2 #Assuming second pole at first stage
+    GBW_stage2 = Av_2 * f_p3 #Assuming third pole at second stage
 
     return GBW_stage1, GBW_stage2
 
@@ -204,9 +203,10 @@ def estimate_pass_pmos_parameters(csv_file, I_load, I_res_div, Vout_LDO, Vctrl, 
     # Interpolate caps at M_scale_both
     kcgd_interp = interp1d(M_scale, kcgd_p, kind='linear', fill_value='extrapolate')
     cgd_p_both = float(kcgd_interp(M_scale_both)) * I_total
+    print(f"Gate-Drain Capacitance (Cgd) at I_total {I_total*1e3:.2f} mA: {cgd_p_both*1e12:.3f} pF")
     kcgs_interp = interp1d(M_scale, kcsg_p, kind='linear', fill_value='extrapolate')
     cgs_p_both = float(kcgs_interp(M_scale_both)) * I_total
-
+    print(f"Gate-Source Capacitance (Cgs) at I_total {I_total*1e3:.2f} mA: {cgs_p_both*1e12:.3f} pF")
     # Interpolate gm and gds at M_scale_both
     kgm_interp = interp1d(M_scale, kgm_p, kind='linear', fill_value='extrapolate')
     gm_p_both = float(kgm_interp(M_scale_both)) * I_total
