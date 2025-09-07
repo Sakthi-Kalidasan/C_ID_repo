@@ -162,3 +162,92 @@ def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, Av_2=1, k_res_div=3/4, 
 
 
     return GBW_stage1, GBW_stage2
+
+def estimate_pass_pmos_parameters(csv_file, I_load, I_res_div, Vout_LDO, Vctrl, f_bw, C_out):
+    """
+    Estimate the effective input capacitance (including Miller effect) of the PMOS pass transistor.
+
+    Args:
+        csv_file (str): Path to the CSV file with device parameters.
+        I_load (float): Load current (A).
+        I_res_div (float): Current through the resistor divider (A).
+        Vout_LDO (float): Output voltage of the LDO (V).
+        Vctrl (float): Control voltage for error amplifer (V).
+        f_bw (float): Bandwidth frequency (Hz).
+        C_out (float): Output capacitance (F).
+
+    Returns:
+        float: Effective input capacitance (F).
+        dict: Details at the selected operating point.
+    """
+    param_master = pd.read_csv(csv_file)
+
+    kgm_p = np.abs(param_master['kgmp Y'])
+    kcsg_p = np.abs(param_master['kcgs Y'])
+    kcgd_p = np.abs(param_master['kcgd Y'])
+    kgds_p = np.abs(param_master['kgds Y'])
+    ids = np.abs(param_master['ids Y'])
+    M_scale = np.abs(param_master['kgmp X'])
+    vd = np.abs(param_master['vd Y'])
+
+
+    R_res_div = Vout_LDO / I_res_div
+    print(f"Resistor Divider Resistance (R_res_div) for 1% current overhead at I_max: {R_res_div:.2f} Ohms")
+
+    I_total = I_load + I_res_div
+    print(f"Total current through the PMOS pass transistor (I_total): {I_total*1e3:.2f} mA")
+    
+    # Find index where both ids is closest to I_total and vd is closest to 1.2V
+    idx_both = ((ids - I_total).abs() + (vd - 1.2).abs()).idxmin()
+    M_scale_both = M_scale.loc[idx_both]
+
+    # Interpolate caps at M_scale_both
+    kcgd_interp = interp1d(M_scale, kcgd_p, kind='linear', fill_value='extrapolate')
+    cgd_p_both = float(kcgd_interp(M_scale_both)) * I_total
+    kcgs_interp = interp1d(M_scale, kcsg_p, kind='linear', fill_value='extrapolate')
+    cgs_p_both = float(kcgs_interp(M_scale_both)) * I_total
+
+    # Interpolate gm and gds at M_scale_both
+    kgm_interp = interp1d(M_scale, kgm_p, kind='linear', fill_value='extrapolate')
+    gm_p_both = float(kgm_interp(M_scale_both)) * I_total
+    kgds_interp = interp1d(M_scale, kgds_p, kind='linear', fill_value='extrapolate')
+    gds_p_both = float(kgds_interp(M_scale_both)) * I_total
+
+    Av_pass_both = gm_p_both / gds_p_both
+    R_L_eff = 1 / (1/R_res_div + gds_p_both)
+    print(f"Effective Load Resistance (R_L_eff) considering Rds: {R_L_eff:.2f} Ohms")
+
+    C_load_eff = C_out + cgd_p_both * (1 + (1 / Av_pass_both))  # Effective load capacitance including Miller effect
+    print(f"Effective Load Capacitance at I_min: {C_load_eff*1e12:.3f} pF")
+
+    # Estimate R_L required to meet the bandwidth target
+    R_L_bw = 1 / (2 * np.pi * f_bw * C_load_eff)
+    print(f"Load Resistance (R_L) required for bandwidth target {f_bw:.1f} Hz: {R_L_bw:.2f} Ohms")
+
+    # Min current overhead for resistor divider
+    R_res_div_max = max(R_res_div, R_L_bw)
+    print(f"Using Resistor Divider Resistance (R_res_div): {R_res_div_max:.2f} Ohms")
+
+    # Estimating the gain with the right R_eff
+    R_L_eff = 1 / (1/R_res_div_max + gds_p_both)
+    Av_pass = gm_p_both * R_L_eff
+    print(f"Av_pass at I_total {I_total*1e3:.2f} mA: {Av_pass:.2f} V/V")
+
+
+    # Effective input capacitance including Miller effect
+    C_in_pass = cgs_p_both + cgd_p_both * (1 + Av_pass)
+
+    k_res_div = Vctrl/Vout_LDO
+
+    details = {
+        'idx_both': idx_both,
+        'M_scale_both': M_scale_both,
+        'gm_p_both': gm_p_both,
+        'gds_p_both': gds_p_both,
+        'Av_pass': Av_pass,
+        'cgs_p_both': cgs_p_both,
+        'cgd_p_both': cgd_p_both,
+        'C_in_pass': C_in_pass,
+        'k_res_div': k_res_div
+    }
+    return C_in_pass, Av_pass, k_res_div, details
