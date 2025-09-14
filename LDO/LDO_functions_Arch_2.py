@@ -5,6 +5,9 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 
+from LDO.LDO_functions import extract_I_req_stage1
+
+
 def estimate_ldo_power_and_pass_params(
     PSRR_target_dB, f_bw, PM_target, I_load, I_res_div, V_out, V_ctrl, C_out, 
     csv_file_nmos, csv_file_pmos, kgm_target=25
@@ -37,87 +40,54 @@ def estimate_ldo_power_and_pass_params(
     }
     return result
 
-def estimate_gbw_and_amplifier_stages(PSRR_target_dB, f_bw, PM_target, C_load, csv_file, kgm_target=25):
+def estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target, C_Load,f_p, kgmp_target):
     """
-    Combines GBW estimation and amplifier stage estimation.
-
-    Returns:
-        result: dict containing GBW_stage1, GBW_stage2, and amplifier stage estimation results.
-    """
-    GBW_stage1, GBW_stage2 = estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, C_load)
-    amp_result = estimate_amplifier_stages(csv_file, GBW_stage1, GBW_stage2, C_load, kgm_target=kgm_target)
-    result = {
-        "GBW_stage1": GBW_stage1,
-        "GBW_stage2": GBW_stage2,
-        "amplifier_stages": amp_result
-    }
-    return result
-
-def analyze_second_stage(C_load, GBW_stage2, kgm_max=25):
-    gm_req = 2 * np.pi * C_load * GBW_stage2
-    I_req = gm_req / kgm_max
-    # print(f"Required gm of the 2nd stage of the amplifier for GBW_stage2 {GBW_stage2*1e-9:.2f} GHz and C_load {C_load*1e12:.1f} pF: {gm_req*1e3:.2f} mS")
-    # print(f"Required current of the 2nd stage of the amplifier for kgm_max {kgm_max} : {I_req*1e3:.2f} mA while having I_budget {I_budget*1e3:.1f} mA and PSRR_target {PSRR_target_dB} dB")
-    return I_req
-
-def estimate_C_in_stg2(csv_file, I_req, kgm_target):
-    """
-    Estimate the input capacitance (C_in) for a source follower stage
-    by finding the closest kgm in the data and using the corresponding kcgs and kcgd.
+    Estimate the required current (I_req), voltage gain (Av), and input capacitance (Cin)
+    for a PMOS amplifier stage given a target DC voltage, load capacitance, and pole frequency.
 
     Args:
         csv_file (str): Path to the CSV file with device parameters.
-        I_req (float): Required current (A).
-        kgm_target (float): Target kgm value.
+        VDC_target (float): Target DC voltage at the output of the amplifier (V).
+        C_Load (float): Load capacitance (F).
+        f_p (float): Target pole frequency (Hz).
 
     Returns:
-        float: Estimated input capacitance (F).
-        dict: Dictionary with details at the selected point.
+        tuple: (I_req, Av, Cin)
+            I_req (float): Required current (A).
+            Av (float): Voltage gain at the selected point.
+            Cin (float): Input capacitance (F).
     """
-    df = pd.read_csv(csv_file)
-    kgm_n = np.abs(df['kgmn Y'])
-    kcsg_n = np.abs(df['kcgs_n Y'])
-    kcgd_n = np.abs(df['kcgd_n Y'])
 
-    idx_kgm = (kgm_n - kgm_target).abs().idxmin()
-    ksg_at_kgm = kcsg_n.iloc[idx_kgm]
-    kcgd_at_kgm = kcgd_n.iloc[idx_kgm]
+    param_master = pd.read_csv(csv_file)
+    # Extract relevant columns
+    kgm_p = np.abs(param_master['kgmp Y'])
+    kcgs_p = np.abs(param_master['kcsg_p Y'])
+    kcgd_p = np.abs(param_master['kcdg_p Y'])
+    kgds_p = np.abs(param_master['kgds_p Y'])
+    ids = np.abs(param_master['kgmp X'])
 
-    cgs = ksg_at_kgm * I_req
-    cgd = kcgd_at_kgm * I_req
-    # For a source follower, Av_2 = 1 (as in your notebook)
-    C_in = cgs + cgd * (1 + 1)
+    # Calculate effective resistance for the target pole
+    R_eff = 1 / (2 * np.pi * f_p * C_Load)
+    # Required current for the target DC voltage
+    I_req = VDC_target / R_eff
 
-    details = {
-        'idx_kgm': idx_kgm,
-        'kgm': kgm_n.iloc[idx_kgm],
-        'kcsg_n': ksg_at_kgm,
-        'kcgd_n': kcgd_at_kgm,
-        'cgs': cgs,
-        'cgd': cgd,
-        'C_in': C_in
-    }
-    return C_in, details
+    # Find the index where kgm_p is closest to the target kgmp
+    # Add kgmp_target as an input argument to the function
+    # (You must also add kgmp_target to the function signature above)
+    idx = (kgm_p - kgmp_target).abs().idxmin()
+    gm_p = kgm_p.iloc[idx] * I_req
+    gds_p = kgds_p.iloc[idx] * I_req
+    Av = gm_p / gds_p if gds_p != 0 else np.nan
 
-def extract_I_req_stage1(C_out, GBW_stage1, kgm_max=25):
-    """
-    Estimate the required current for the first stage of the amplifier
-    given the output capacitance, GBW, and maximum kgm.
+    cgs_p = kcgs_p.iloc[idx] * I_req
+    cgd_p = kcgd_p.iloc[idx] * I_req
+    Cin = cgs_p + cgd_p * (1 + Av)
 
-    Args:
-        C_in (float): Input capacitance of the first stage (F).
-        GBW_stage1 (float): Gain-bandwidth product for the first stage (Hz).
-        kgm_max (float): Maximum allowed gm/I (default: 25 S/A).
-
-    Returns:
-        float: Required current for the first stage (A).
-    """
-    gm_req = 2 * np.pi * C_out * GBW_stage1
-    I_req = gm_req / kgm_max
-    return I_req
+    return I_req, Av, Cin
 
 
-def estimate_amplifier_stages(csv_file, GBW_stage1, GBW_stage2, C_load, kgm_target=25):
+
+def estimate_amplifier_stages(csv_file, GBW_stage1, f_p, C_load, kgm2_target=25):
     """
     Estimate the required currents for both amplifier stages and total current.
 
@@ -138,12 +108,10 @@ def estimate_amplifier_stages(csv_file, GBW_stage1, GBW_stage2, C_load, kgm_targ
             'details_stage2': Details at selected point for stage 2
         }
     """
-    # 1. Estimate I_req2 based on GBW_stage2 and I_budget
-    I_req_stage2 = analyze_second_stage(C_load, GBW_stage2, kgm_target)
-    # 2. Estimate Cin for the second stage
-    C_in_stage2, details_stage2 = estimate_C_in_stg2(csv_file, I_req_stage2, kgm_target)
+    # 2. Estimate Cin,Av for the second stage
+    C_in_stage2, Av_stage2, I_req_stage2 = estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target=1.25, C_Load=C_load, f_p=f_p, kgmp_target=kgm2_target)
     # 3. Estimate I_req1 based on Cin and GBW_stage1
-    I_req_stage1 = extract_I_req_stage1(C_in_stage2, GBW_stage1, kgm_target)
+    I_req_stage1 = extract_I_req_stage1(C_in_stage2, GBW_stage1, kgm_max=kgm2_target)
     # 4. Total required current
     I_req_total = I_req_stage1 + I_req_stage2
 
@@ -156,10 +124,9 @@ def estimate_amplifier_stages(csv_file, GBW_stage1, GBW_stage2, C_load, kgm_targ
         'C_in_stage2': C_in_stage2,
         'I_req_stage1': I_req_stage1,
         'I_req_total': I_req_total,
-        'details_stage2': details_stage2
     }
 
-def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, Av_2=1, k_res_div=3/4, Av_pass=25):
+def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, k_res_div=3/4, Av_pass=25, csv_file=None, VDC_target=1.25, C_Load=11e-12, kgmp_target=15):
     """
     Estimate the required GBW for stage 1 and stage 2 of the amplifier.
 
@@ -183,8 +150,14 @@ def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, Av_2=1, k_res_div=3/4, 
     # Third pole location for stability
     f_p3 = f_p2 * 2
 
-    # Stage 2 gain (Av_2) is determined by system requirements; here, assume unity due to architecture choice
-    Av_2 = 1  # If you want to use a specific Av_1, pass as argument
+
+    f_p = f_p3        # Use calculated second pole frequency
+
+    # Only call if csv_file is provided
+    if csv_file is not None:
+        _, Av_2, _ = estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target, C_Load, f_p, kgmp_target)
+    else:
+        Av_2 = 1  # Fallback if no CSV file provided
 
     Av_1 = (1 / PSRR_target) * (1 / Av_2) * (1/k_res_div) * (1/Av_pass)
 
