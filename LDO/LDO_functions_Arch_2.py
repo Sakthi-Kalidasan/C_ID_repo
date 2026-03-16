@@ -5,12 +5,10 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 
-from LDO.LDO_functions import extract_I_req_stage1
-
 
 def estimate_ldo_power_and_pass_params(
     PSRR_target_dB, f_bw, PM_target, I_load, I_res_div, V_out, V_ctrl, C_out, 
-    csv_file_nmos, csv_file_pmos, kgm_target=25
+    csv_file_pmos_stage2, csv_file_pass_pmos, kgm_target=25
 ):
     """
     Combines PMOS pass device estimation and amplifier stage power estimation.
@@ -20,11 +18,14 @@ def estimate_ldo_power_and_pass_params(
     """
     # Estimate PMOS pass device parameters
     C_in_pass, Av_pass, k_res_div, details_pass = estimate_pass_pmos_parameters(
-        csv_file_pmos, I_load, I_res_div, V_out, V_ctrl, f_bw, C_out
+        csv_file_pass_pmos, I_load, I_res_div, V_out, V_ctrl, f_bw, C_out
     )
     # Use C_in_pass as C_load for amplifier stage estimation
-    GBW_stage1, GBW_stage2 = estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, C_in_pass)
-    amp_result = estimate_amplifier_stages(csv_file_nmos, GBW_stage1, GBW_stage2, C_in_pass, kgm_target=kgm_target)
+    VDC_target = 1.25  # Target DC voltage at the output of the amplifier determined by the LDO pass transistor
+    kgm2_target = 4
+    kgm1_target = 25
+    I_total, I_req_stage1, I_req_stage2, GBW_stage1, GBW_stage2 = estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, k_res_div, Av_pass, csv_file_pmos_stage2, VDC_target, C_in_pass, kgmp_2_target=kgm2_target, kgmp_stage1=kgm1_target)
+
     result = {
         "C_in_pass": C_in_pass,
         "Av_pass": Av_pass,
@@ -32,11 +33,9 @@ def estimate_ldo_power_and_pass_params(
         "details_pass": details_pass,
         "GBW_stage1": GBW_stage1,
         "GBW_stage2": GBW_stage2,
-        "amplifier_stages": amp_result,
-        "I_total": amp_result.get("I_req_total", None),
-        "I_req1": amp_result.get("I_req_stage1", None),
-        "I_req2": amp_result.get("I_req_stage2", None),
-        "C_in_stage2": amp_result.get("C_in_stage2", None)
+        "I_total": I_total,
+        "I_req1": I_req_stage1,
+        "I_req2": I_req_stage2,
     }
     return result
 
@@ -86,47 +85,7 @@ def estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target, C_Load,f_p
     return I_req, Av, Cin
 
 
-
-def estimate_amplifier_stages(csv_file, GBW_stage1, f_p, C_load, kgm2_target=25):
-    """
-    Estimate the required currents for both amplifier stages and total current.
-
-    Args:
-        csv_file (str): Path to the CSV file with device parameters.
-        GBW_stage1 (float): Gain-bandwidth product for the first stage (Hz).
-        GBW_stage2 (float): Gain-bandwidth product for the second stage (Hz).
-        I_budget (float): Current budget for the second stage (A).
-        kgm_target (float): Target kgm value for both stages (default: 25).
-        C_load (float): Load capacitance for stage 2 (F).
-
-    Returns:
-        dict: {
-            'I_req_stage2': Required current for stage 2 (A),
-            'C_in_stage2': Estimated input capacitance for stage 2 (F),
-            'I_req_stage1': Required current for stage 1 (A),
-            'I_req_total': Total required current (A),
-            'details_stage2': Details at selected point for stage 2
-        }
-    """
-    # 2. Estimate Cin,Av for the second stage
-    C_in_stage2, Av_stage2, I_req_stage2 = estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target=1.25, C_Load=C_load, f_p=f_p, kgmp_target=kgm2_target)
-    # 3. Estimate I_req1 based on Cin and GBW_stage1
-    I_req_stage1 = extract_I_req_stage1(C_in_stage2, GBW_stage1, kgm_max=kgm2_target)
-    # 4. Total required current
-    I_req_total = I_req_stage1 + I_req_stage2
-
-    print(f"Stage 2 required current (I_req_stage2): {I_req_stage2*1e3:.4f} mA")
-    print(f"Stage 2 input capacitance (C_in_stage2): {C_in_stage2*1e12:.2f} pF")
-    print(f"Stage 1 required current (I_req_stage1): {I_req_stage1*1e3:.4f} mA")
-    print(f"Total required current (I_req_total): {I_req_total*1e3:.4f} mA")
-    return {
-        'I_req_stage2': I_req_stage2,
-        'C_in_stage2': C_in_stage2,
-        'I_req_stage1': I_req_stage1,
-        'I_req_total': I_req_total,
-    }
-
-def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, k_res_div=3/4, Av_pass=25, csv_file=None, VDC_target=1.25, C_Load=11e-12, kgmp_target=15):
+def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, k_res_div=3/4, Av_pass=25, csv_file=None, VDC_target=1.25, C_Load=11e-12, kgmp_2_target=15, kgmp_stage1=25):
     """
     Estimate the required GBW for stage 1 and stage 2 of the amplifier.
 
@@ -149,22 +108,24 @@ def estimate_GBW_stages(PSRR_target_dB, f_bw, PM_target, k_res_div=3/4, Av_pass=
     f_p2 = f_u * np.tan(np.radians(PM_target))
     # Third pole location for stability
     f_p3 = f_p2 * 2
-
-
     f_p = f_p3        # Use calculated second pole frequency
 
     # Only call if csv_file is provided
     if csv_file is not None:
-        _, Av_2, _ = estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target, C_Load, f_p, kgmp_target)
+        I_req_stage2, Av_2, Cin_stage2 = estimate_stage2_cs_amp_with_res_load_params(csv_file, VDC_target, C_Load, f_p, kgmp_2_target)
     else:
         Av_2 = 1  # Fallback if no CSV file provided
 
-    Av_1 = (1 / PSRR_target) * (1 / Av_2) * (1/k_res_div) * (1/Av_pass)
 
-    GBW_stage1 = Av_1 * f_p2 #Assuming second pole at first stage
     GBW_stage2 = Av_2 * f_p3 #Assuming third pole at second stage
 
-    return GBW_stage1, GBW_stage2
+    Av_1 = (1 / PSRR_target) * (1 / Av_2) * (1/k_res_div) * (1/Av_pass)
+    GBW_stage1 = Av_1 * f_p2 #Assuming second pole at first stage
+
+    I_req_stage1 = GBW_stage1*Cin_stage2 / kgmp_stage1
+    I_total = I_req_stage1 + I_req_stage2
+
+    return I_total,I_req_stage1,I_req_stage2, GBW_stage1, GBW_stage2
 
 def estimate_pass_pmos_parameters(csv_file, I_load, I_res_div, Vout_LDO, Vctrl, f_bw, C_out):
     """
@@ -255,3 +216,31 @@ def estimate_pass_pmos_parameters(csv_file, I_load, I_res_div, Vout_LDO, Vctrl, 
         'k_res_div': k_res_div
     }
     return C_in_pass, Av_pass, k_res_div, details
+
+
+## Testing the script 
+
+if __name__ == "__main__": 
+    # Example parameters
+    PSRR_target_dB = -40  # Target PSRR in dB
+    f_bw = 100e3  # Desired bandwidth in Hz
+    PM_target = 60  # Target phase margin in degrees
+    I_load = 10e-3  # Load current in A
+    I_res_div = 5e-6  # Resistor divider current in A
+    V_out = 1.2  # Output voltage in V
+    V_ctrl = 1.25  # Control voltage in V
+    C_out = 10e-12  # Output capacitance in F
+    csv_file_ldo_pass = 'LDO/ldo_pmos_kgm_char_Msweep_10mA.csv'  # Path to NMOS parameters CSV file
+    csv_file_pmos_stage2 = 'LDO/cs_amp_pmos_master.csv'  # Path to PMOS parameters CSV file
+
+    result = estimate_ldo_power_and_pass_params(
+        PSRR_target_dB, f_bw, PM_target, I_load, I_res_div, V_out, V_ctrl, C_out,
+       csv_file_pmos_stage2, csv_file_ldo_pass,  kgm_target=25
+    )
+
+    print("\nEstimated LDO Parameters:")
+    for key, value in result.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.4e}")
+        else:
+            print(f"{key}: {value}")
